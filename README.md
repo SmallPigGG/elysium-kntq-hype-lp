@@ -26,21 +26,25 @@ Vite 8 needs Node `^20.19.0` or `>=22.12.0`. No `.env` file is required. RPC URL
 
 ## Elysium (chain 99901)
 
-Add or switch the wallet to Elysium. The connect bar calls `wallet_addEthereumChain` / `wallet_switchEthereumChain` when the wallet is on another chain.
+Add or switch the wallet to Elysium. The connect bar calls `wallet_addEthereumChain` / `wallet_switchEthereumChain` when the wallet is on another chain, and passes the same RPC list the app uses (BOXA first). You can add the network manually with that same primary URL.
 
 | Field | Value |
 | --- | --- |
 | Network name | Elysium |
 | Chain ID | `99901` (`0x1863d`) |
 | Native currency | HYPE, 18 decimals |
-| RPC | `https://rpc.eleos.fun` |
+| RPC | `https://rpc-live.boxa.club` |
 | Explorer | https://elyscan.fun |
+
+The chain name sent to the wallet stays **Elysium**. MetaMask may show the network as “Elysium (via BOXA RPC)” when the endpoint is a BOXA RPC.
 
 The app fails over across these public RPCs, in order:
 
-1. https://rpc.eleos.fun
-2. https://rpc.elysiumswap.finance
-3. https://rpc.stockium.fun
+1. https://rpc-live.boxa.club (BOXA, primary)
+2. https://rpc.boxa.club (BOXA)
+3. https://rpc.eleos.fun
+4. https://rpc.elysiumswap.finance
+5. https://rpc.stockium.fun
 
 Treat public RPC responses as untrusted for display. Prefer your own RPC if you need stronger guarantees; this release does not yet expose a custom-RPC UI field.
 
