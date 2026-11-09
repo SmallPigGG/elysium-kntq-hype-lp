@@ -3,7 +3,6 @@ import {
   encodeFunctionData,
   type Address,
   type Hex,
-  maxUint256,
 } from 'viem'
 import { useAccount, useWalletClient } from 'wagmi'
 import { publicClient } from '../lib/rpcClient'
@@ -16,6 +15,23 @@ import {
   POSITION_MANAGER,
 } from '../config/contracts'
 import { toChineseError } from '../lib/errors'
+import { formatUnits } from '../lib/math'
+
+/** Permit2 amount is uint160 */
+const PERMIT2_MAX_AMOUNT = 2n ** 160n - 1n
+/** Session-scale Permit2 expiry (1 hour), not multi-week unlimited */
+const PERMIT2_EXPIRY_SECONDS = 3600
+/** Tiny buffer so rounding / pool moves don't brick a just-approved mint */
+const APPROVAL_BUFFER_BPS = 10n // 0.1%
+
+export type ApprovalStep = {
+  label: string
+  to: Address
+  data: Hex
+  value?: bigint
+  /** Human-readable details shown in the preview modal */
+  detail?: string[]
+}
 
 export type TxPreview = {
   title: string
@@ -23,8 +39,18 @@ export type TxPreview = {
   to: Address
   data: Hex
   value: bigint
-  /** Optional approval steps run before main tx (each still previewed/confirmed by user via wallet) */
-  approvals?: { label: string; to: Address; data: Hex; value?: bigint }[]
+  approvals?: ApprovalStep[]
+  /**
+   * Which step the user is confirming right now.
+   * 0..approvals.length-1 = that approval; approvals.length = main LP tx.
+   */
+  stepIndex: number
+}
+
+function withApprovalBuffer(needed: bigint): bigint {
+  if (needed <= 0n) return 0n
+  const buffered = needed + (needed * APPROVAL_BUFFER_BPS) / 10_000n
+  return buffered > PERMIT2_MAX_AMOUNT ? PERMIT2_MAX_AMOUNT : buffered
 }
 
 export function useTxFlow() {
@@ -36,8 +62,8 @@ export function useTxFlow() {
   const { error, setError } = useStateError()
   const [lastTx, setLastTx] = useState<Hex | null>(null)
 
-  const openPreview = useCallback((p: TxPreview) => {
-    setPreview(p)
+  const openPreview = useCallback((p: Omit<TxPreview, 'stepIndex'> & { stepIndex?: number }) => {
+    setPreview({ ...p, stepIndex: p.stepIndex ?? 0 })
     setError(null)
     setLastTx(null)
   }, [setError])
@@ -47,46 +73,67 @@ export function useTxFlow() {
     setPreview(null)
   }, [sending, simulating])
 
-  const ensureKntqPermit2 = useCallback(async (): Promise<TxPreview['approvals']> => {
-    if (!address) return []
-    const approvals: NonNullable<TxPreview['approvals']> = []
-    const allowance = await publicClient.readContract({
-      address: KNTQ,
-      abi: erc20Abi,
-      functionName: 'allowance',
-      args: [address, PERMIT2],
-    })
-    if (allowance < maxUint256 / 2n) {
-      approvals.push({
-        label: '授权 KNTQ → Permit2',
-        to: KNTQ,
-        data: encodeFunctionData({
-          abi: erc20Abi,
-          functionName: 'approve',
-          args: [PERMIT2, maxUint256],
-        }),
+  const ensureKntqPermit2 = useCallback(
+    async (neededKntq: bigint): Promise<ApprovalStep[]> => {
+      if (!address || neededKntq <= 0n) return []
+      const amount = withApprovalBuffer(neededKntq)
+      const approvals: ApprovalStep[] = []
+      const amountLabel = formatUnits(amount, 18, 6)
+
+      const allowance = await publicClient.readContract({
+        address: KNTQ,
+        abi: erc20Abi,
+        functionName: 'allowance',
+        args: [address, PERMIT2],
       })
-    }
-    const [amt, exp] = await publicClient.readContract({
-      address: PERMIT2,
-      abi: permit2Abi,
-      functionName: 'allowance',
-      args: [address, KNTQ, POSITION_MANAGER],
-    })
-    const now = Math.floor(Date.now() / 1000)
-    if (amt < 2n ** 159n || Number(exp) < now + 3600) {
-      approvals.push({
-        label: 'Permit2 授权 KNTQ → PositionManager',
-        to: PERMIT2,
-        data: encodeFunctionData({
-          abi: permit2Abi,
-          functionName: 'approve',
-          args: [KNTQ, POSITION_MANAGER, 2n ** 160n - 1n, Number(now + 30 * 24 * 3600)],
-        }),
+      if (allowance < amount) {
+        approvals.push({
+          label: '授权 KNTQ → Permit2',
+          to: KNTQ,
+          data: encodeFunctionData({
+            abi: erc20Abi,
+            functionName: 'approve',
+            args: [PERMIT2, amount],
+          }),
+          detail: [
+            `spender: Permit2 (${PERMIT2})`,
+            `额度: ${amountLabel} KNTQ（按本次需要 +0.1% 缓冲，非无限授权）`,
+          ],
+        })
+      }
+
+      const [amt, exp] = await publicClient.readContract({
+        address: PERMIT2,
+        abi: permit2Abi,
+        functionName: 'allowance',
+        args: [address, KNTQ, POSITION_MANAGER],
       })
-    }
-    return approvals
-  }, [address])
+      const now = Math.floor(Date.now() / 1000)
+      const expiry = now + PERMIT2_EXPIRY_SECONDS
+      const permitAmtOk = amt >= amount
+      const permitExpOk = Number(exp) >= now + 300 // at least ~5 min left
+      if (!permitAmtOk || !permitExpOk) {
+        const permitAmount =
+          amount > PERMIT2_MAX_AMOUNT ? PERMIT2_MAX_AMOUNT : amount
+        approvals.push({
+          label: 'Permit2 授权 KNTQ → PositionManager',
+          to: PERMIT2,
+          data: encodeFunctionData({
+            abi: permit2Abi,
+            functionName: 'approve',
+            args: [KNTQ, POSITION_MANAGER, permitAmount, expiry],
+          }),
+          detail: [
+            `spender: PositionManager (${POSITION_MANAGER})`,
+            `额度: ${formatUnits(permitAmount, 18, 6)} KNTQ（按本次需要，非 2^160-1）`,
+            `有效期: 约 1 小时（至 ${new Date(expiry * 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })} Asia/Shanghai）`,
+          ],
+        })
+      }
+      return approvals
+    },
+    [address],
+  )
 
   const buildModifyTx = useCallback(
     async (opts: {
@@ -95,14 +142,16 @@ export function useTxFlow() {
       unlockData: Hex
       value: bigint
       deadline: bigint
-      needKntqApproval?: boolean
+      /** Exact KNTQ the mint/increase may pull (usually amount1Max). Cap approvals to this. */
+      kntqAmountNeeded?: bigint
     }) => {
       const data = encodeFunctionData({
         abi: positionManagerAbi,
         functionName: 'modifyLiquidities',
         args: [opts.unlockData, opts.deadline],
       })
-      const approvals = opts.needKntqApproval ? await ensureKntqPermit2() : []
+      const need = opts.kntqAmountNeeded ?? 0n
+      const approvals = need > 0n ? await ensureKntqPermit2(need) : []
       openPreview({
         title: opts.title,
         summary: opts.summary,
@@ -110,61 +159,62 @@ export function useTxFlow() {
         data,
         value: opts.value,
         approvals,
+        stepIndex: 0,
       })
     },
     [ensureKntqPermit2, openPreview],
   )
 
+  /** Confirm and send ONLY the current step (one approval OR the main tx). */
   const confirmAndSend = useCallback(async () => {
     if (!preview || !walletClient || !address) {
       setError('请先连接钱包')
       return
     }
     setError(null)
+
+    const approvals = preview.approvals ?? []
+    const isApproval = preview.stepIndex < approvals.length
+    const step = isApproval
+      ? approvals[preview.stepIndex]
+      : {
+          label: preview.title,
+          to: preview.to,
+          data: preview.data,
+          value: preview.value,
+        }
+
     setSimulating(true)
     try {
-      // 1) Run approval txs first if needed (each signed once, no auto-retry)
-      for (const step of preview.approvals ?? []) {
-        await publicClient.call({
-          account: address,
-          to: step.to,
-          data: step.data,
-          value: step.value ?? 0n,
-        })
-        setSimulating(false)
-        setSending(true)
-        const hash = await walletClient.sendTransaction({
-          account: address,
-          to: step.to,
-          data: step.data,
-          value: step.value ?? 0n,
-          chain: walletClient.chain,
-        })
-        await publicClient.waitForTransactionReceipt({ hash })
-        setSending(false)
-        setSimulating(true)
-      }
-
-      // 2) Simulate main call (eth_call) before sign
       await publicClient.call({
         account: address,
-        to: preview.to,
-        data: preview.data,
-        value: preview.value,
+        to: step.to,
+        data: step.data,
+        value: step.value ?? 0n,
       })
       setSimulating(false)
       setSending(true)
-      // Exactly one send — never auto-resubmit
+      // Exactly one send for this step — never auto-resubmit
       const hash = await walletClient.sendTransaction({
         account: address,
-        to: preview.to,
-        data: preview.data,
-        value: preview.value,
+        to: step.to,
+        data: step.data,
+        value: step.value ?? 0n,
         chain: walletClient.chain,
       })
-      setLastTx(hash)
       await publicClient.waitForTransactionReceipt({ hash })
-      setPreview(null)
+
+      if (isApproval) {
+        // Advance to next step; require a fresh in-app confirm (no chaining wallet popups)
+        setPreview({
+          ...preview,
+          stepIndex: preview.stepIndex + 1,
+        })
+        setLastTx(hash)
+      } else {
+        setLastTx(hash)
+        setPreview(null)
+      }
     } catch (e) {
       setError(toChineseError(e))
     } finally {

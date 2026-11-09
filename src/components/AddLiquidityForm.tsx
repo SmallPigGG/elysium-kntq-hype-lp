@@ -150,11 +150,14 @@ export function AddLiquidityForm({
           `流动性 Δ ${previewCalc.liq.toString()}`,
           `最多支付 ${formatUnits(amount0Max, 18)} HYPE + ${formatUnits(amount1Max, 18)} KNTQ`,
           `滑点 ${slip}%（用户设定，不会自动加宽）`,
+          amount1Max > 0n
+            ? `KNTQ 授权将按本次上限 ${formatUnits(amount1Max, 18)}（+0.1% 缓冲）封顶，Permit2 约 1 小时有效`
+            : '本次无需 KNTQ 授权',
         ],
         unlockData,
         value,
         deadline,
-        needKntqApproval: amount1Max > 0n,
+        kntqAmountNeeded: amount1Max,
       })
       return
     }
@@ -179,11 +182,14 @@ export function AddLiquidityForm({
         `预计使用 ${formatUnits(previewCalc.used.amount0, 18)} HYPE + ${formatUnits(previewCalc.used.amount1, 18)} KNTQ`,
         `上限（含滑点 ${slip}%） ${formatUnits(amount0Max, 18)} HYPE + ${formatUnits(amount1Max, 18)} KNTQ`,
         `deadline ${deadlineMin} 分钟`,
+        amount1Max > 0n
+          ? `KNTQ 授权按本次上限封顶（+0.1% 缓冲），Permit2 约 1 小时有效`
+          : '本次无需 KNTQ 授权',
       ].filter(Boolean),
       unlockData,
       value,
       deadline,
-      needKntqApproval: amount1Max > 0n,
+      kntqAmountNeeded: amount1Max,
     })
   }
 

@@ -2,7 +2,7 @@
 
 Local browser dapp for the KNTQ/native-HYPE Uniswap V4 pool on Elysium. It reads live chain data and lets you mint liquidity, collect fees, and withdraw a position.
 
-Transactions are signed only in your own wallet. The app previews each call, simulates it with `eth_call`, then asks the wallet to sign once. It does not custody funds, hold keys, or widen slippage on its own.
+Transactions are signed only in your own wallet. The app previews each call, simulates it with `eth_call`, then asks the wallet to sign once per step. It does not custody funds, hold keys, or widen slippage on its own.
 
 The interface is in Chinese. Range buttons, position cards, and transaction previews use those labels.
 
@@ -42,6 +42,8 @@ The app fails over across these public RPCs, in order:
 2. https://rpc.elysiumswap.finance
 3. https://rpc.stockium.fun
 
+Treat public RPC responses as untrusted for display. Prefer your own RPC if you need stronger guarantees; this release does not yet expose a custom-RPC UI field.
+
 ## Contracts
 
 Verified on Elysium on 2026-11-09.
@@ -69,7 +71,7 @@ PoolKey:
 
 Full-range ticks: `-887200` to `887200`.
 
-KNTQ is approved to canonical Permit2, then Permit2 is approved to the PositionManager. Native HYPE is sent as `msg.value` and excess is returned with `SWEEP`.
+KNTQ is approved to canonical Permit2 for the **exact amount needed** for that mint/increase (+0.1% buffer), then Permit2 is approved to the PositionManager for the same capped amount with a **~1 hour** expiry. Native HYPE is sent as `msg.value` and excess is returned with `SWEEP`.
 
 ## What you can do
 
@@ -77,8 +79,9 @@ KNTQ is approved to canonical Permit2, then Permit2 is approved to the PositionM
 2. Read HYPE and KNTQ balances and the on-chain slot0 price.
 3. Mint a new position or add to an existing token id.
 4. Browse your positions (principal, uncollected fees, a short-window APR). Sort by principal, fees, APR, or token id. Positions with `liquidity = 0` are hidden.
-5. Collect fees or withdraw (burn the position NFT). Each action opens a preview, simulates, then sends one wallet signature.
+5. Collect fees or withdraw (burn the position NFT). Each action opens a preview; **each approval and the main call is a separate in-app confirm** with its own `eth_call` + wallet signature.
 6. A stale-data banner appears when the pool quote is older than about 20 seconds. Refresh before sending.
+7. Collect and withdraw use the same user-set slippage / deadline controls shown in the meta panel (default `0.5%` / `20` min). Fee collect mins are expected fees minus that slippage (not `0`).
 
 USD figures are display-only. Paste a HYPE/USD price yourself; the app does not invent a quote.
 
@@ -97,13 +100,15 @@ Mint ranges are centered on the current tick and aligned to `tickSpacing = 200`.
 
 The form shows the price band, whether spot is inside it, and a rough liquidity multiple versus full range for the same token budgets.
 
-## Safety
+## SECURITY
 
-- **Local wallet sign only.** Keys stay in the wallet. There is no backend and no remote signer.
-- **Preview, then simulate.** The modal shows the call. `eth_call` runs before `sendTransaction`.
-- **No custody.** Tokens move only in the transactions you sign (Permit2 approvals, `modifyLiquidities`).
-- **No automatic slippage widen.** Min/max amounts use the slippage percent you typed (default `0.5%`). A failed send is not retried and is not resubmitted with looser bounds. Confirm again yourself if you want another attempt.
-- **No secrets in the repo.** Do not commit private keys, seed phrases, or `.env` files.
+- **No keys in the repo or app.** There is no backend, no remote signer, and no private key / seed phrase storage. Clone and run locally; only your browser wallet signs.
+- **「模拟」≠ 测网.** Preview simulation is `eth_call` against live Elysium `99901` (mainnet already live). It checks whether the call would revert and estimates gas; it does not mean a separate test network.
+- **Capped approvals.** ERC-20 approve to Permit2 and Permit2→PositionManager use the amount needed for that mint/increase (+0.1% buffer), not `maxUint256` / `2^160-1`. Permit2 expiry is about **1 hour**, not 30 days unlimited.
+- **Per-step confirms.** Approve KNTQ, Approve Permit2, and the main LP tx each require their own in-app confirm + wallet signature. The app does not chain all wallet popups after one click.
+- **No automatic slippage widen / no auto-resend.** Min/max amounts use the slippage percent you typed. A failed send is not retried and is not resubmitted with looser bounds.
+- **No secrets committed.** `.env` / `.env.*` are gitignored. Do not commit private keys, seed phrases, or personal wallet addresses.
+- **RPC trust.** Default RPCs are public. A malicious or wrong RPC can lie about prices or simulation results; always read the wallet’s own transaction summary before signing.
 
 ## Known limits
 
@@ -117,6 +122,8 @@ If a chunked log query fails, the list falls back to that `ownerOf` window. Olde
 **TokenId withdraw fallback.** If the list is empty or the scan fails, use **TokenId 快速撤池** on the positions panel. Enter the NFT id, and the app loads `ownerOf`, liquidity, and ticks, then opens the same withdraw preview (owner must be the connected wallet, liquidity must be non-zero).
 
 Uncollected fees come from StateView `getPositionInfo` and `getFeeGrowthInside`. If a node cannot serve that read, the card shows `0` fees while principal still comes from real liquidity. This pool has `hooks = address(0)`; hooked positions are out of scope.
+
+Custom RPC field in the UI is deferred (document trust above instead).
 
 ## License
 

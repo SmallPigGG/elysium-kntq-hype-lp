@@ -40,8 +40,11 @@ export default function App() {
 
   const { positions, loading, error: posError, refresh: refreshPos } = usePositions(pool, hypeUsdNum)
   const tx = useTxFlow()
-  const [slippage] = useState(DEFAULT_SLIPPAGE_PCT)
+  const [slippage, setSlippage] = useState(String(DEFAULT_SLIPPAGE_PCT))
+  const [deadlineMin, setDeadlineMin] = useState(String(DEFAULT_DEADLINE_MIN))
   const [manualTokenId, setManualTokenId] = useState('')
+  const slip = Number(slippage)
+  const slipOk = Number.isFinite(slip) && slip >= 0
 
   async function loadPosition(tokenId: bigint): Promise<LpPosition | null> {
     if (!pool) return null
@@ -113,17 +116,24 @@ export default function App() {
       alert('行情已过期，请先刷新')
       return
     }
-    const deadline = BigInt(Math.floor(Date.now() / 1000) + DEFAULT_DEADLINE_MIN * 60)
+    if (!slipOk) {
+      alert('请填写有效滑点（不会自动放宽）')
+      return
+    }
+    const amount0Min = applySlippageMin(p.fees0, slip)
+    const amount1Min = applySlippageMin(p.fees1, slip)
+    const deadline = BigInt(Math.floor(Date.now() / 1000) + Number(deadlineMin) * 60)
     const { unlockData, value } = encodeCollectFees({
       tokenId: p.tokenId,
       recipient: address,
-      amount0Min: 0n,
-      amount1Min: 0n,
+      amount0Min,
+      amount1Min,
     })
     await tx.buildModifyTx({
       title: `提取手续费 #${p.tokenId}`,
       summary: [
         `预估待领 ${formatUnits(p.fees0, 18, 6)} HYPE + ${formatUnits(p.fees1, 18, 6)} KNTQ`,
+        `最少领取 ${formatUnits(amount0Min, 18, 6)} HYPE + ${formatUnits(amount1Min, 18, 6)} KNTQ（滑点 ${slip}%）`,
         '动作：DECREASE_LIQUIDITY(0) + TAKE_PAIR',
       ],
       unlockData,
@@ -138,14 +148,18 @@ export default function App() {
       alert('行情已过期，请先刷新')
       return
     }
+    if (!slipOk) {
+      alert('请填写有效滑点（不会自动放宽）')
+      return
+    }
     const ok = confirm(`确认撤出仓位 #${p.tokenId} 的全部流动性并领回代币？`)
     if (!ok) return
     const sqrtA = getSqrtRatioAtTick(p.tickLower)
     const sqrtB = getSqrtRatioAtTick(p.tickUpper)
     const amounts = getAmountsForLiquidity(pool.sqrtPriceX96, sqrtA, sqrtB, p.liquidity)
-    const amount0Min = applySlippageMin(amounts.amount0, slippage)
-    const amount1Min = applySlippageMin(amounts.amount1, slippage)
-    const deadline = BigInt(Math.floor(Date.now() / 1000) + DEFAULT_DEADLINE_MIN * 60)
+    const amount0Min = applySlippageMin(amounts.amount0, slip)
+    const amount1Min = applySlippageMin(amounts.amount1, slip)
+    const deadline = BigInt(Math.floor(Date.now() / 1000) + Number(deadlineMin) * 60)
     const { unlockData, value } = encodeDecreaseLiquidity({
       tokenId: p.tokenId,
       liquidity: p.liquidity,
@@ -158,7 +172,8 @@ export default function App() {
       title: `撤池并销毁 NFT #${p.tokenId}`,
       summary: [
         `流动性 ${p.liquidity.toString()}`,
-        `最少收回 ${formatUnits(amount0Min, 18)} HYPE + ${formatUnits(amount1Min, 18)} KNTQ（滑点 ${slippage}%）`,
+        `最少收回 ${formatUnits(amount0Min, 18)} HYPE + ${formatUnits(amount1Min, 18)} KNTQ（滑点 ${slip}%）`,
+        `deadline ${deadlineMin} 分钟`,
         '动作：BURN_POSITION + TAKE_PAIR',
       ],
       unlockData,
@@ -200,6 +215,23 @@ export default function App() {
             value={hypeUsd}
             onChange={(e) => setHypeUsd(e.target.value)}
             placeholder="手动填入，用于卡片美元估值"
+          />
+        </div>
+        <div>
+          <div className="label">领费 / 撤池滑点 %</div>
+          <input
+            value={slippage}
+            onChange={(e) => setSlippage(e.target.value)}
+            placeholder="0.5"
+          />
+          <div className="muted small">仅你填写；失败不会自动放宽</div>
+        </div>
+        <div>
+          <div className="label">领费 / 撤池 Deadline（分钟）</div>
+          <input
+            value={deadlineMin}
+            onChange={(e) => setDeadlineMin(e.target.value)}
+            placeholder="20"
           />
         </div>
         {isConnected && (
