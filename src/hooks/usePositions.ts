@@ -3,7 +3,6 @@ import { useAccount } from 'wagmi'
 import {
   type Address,
   type Hex,
-  parseAbiItem,
 } from 'viem'
 import { publicClient } from '../lib/rpcClient'
 import { positionManagerAbi } from '../abis/positionManager'
@@ -40,74 +39,87 @@ export type LpPosition = {
 }
 
 async function tokenIdsForOwner(owner: Address): Promise<bigint[]> {
-  // POSM is not ERC721Enumerable. Scan all token IDs via ownerOf (multicall-friendly)
-  // plus recent Transfer logs. Elysium has ~0.1s blocks so log lookback is limited.
   const owned = new Set<string>()
+
+  // Load previously discovered tokenIds for this wallet (instant on subsequent visits)
+  const cacheKey = `elysium-lp-pos:${owner.toLowerCase()}`
+  try {
+    const raw = localStorage.getItem(cacheKey)
+    if (raw) {
+      const arr = JSON.parse(raw) as string[]
+      for (const s of arr) owned.add(s)
+    }
+  } catch {
+    /* ignore */
+  }
+
   const next = await publicClient.readContract({
     address: POSITION_MANAGER,
     abi: positionManagerAbi,
     functionName: 'nextTokenId',
   })
   const n = Number(next)
-  if (n <= 1) return []
+  if (n <= 1) return [...owned].map(BigInt)
 
-  // Scan all existing tokenIds in batches. With multicall this is fast enough for ~10k NFTs.
+  // Scan recent window with smaller batches + delay to avoid 429 on public RPCs.
+  // Multicall3 is available; keep batches modest.
+  const WINDOW = Math.min(n - 1, 500)
+  const startId = Math.max(1, n - WINDOW)
   const BATCH = 80
-  for (let i = 1; i < n; i += BATCH) {
+
+  for (let i = startId; i < n; i += BATCH) {
     const chunk = Array.from({ length: Math.min(BATCH, n - i) }, (_, k) => BigInt(i + k))
-    const owners = await Promise.all(
-      chunk.map((tokenId) =>
-        publicClient
-          .readContract({
-            address: POSITION_MANAGER,
-            abi: positionManagerAbi,
-            functionName: 'ownerOf',
-            args: [tokenId],
-          })
-          .catch(() => null),
-      ),
-    )
-    owners.forEach((o, idx) => {
-      if (o && o.toLowerCase() === owner.toLowerCase()) owned.add(chunk[idx]!.toString())
-    })
+    const contracts = chunk.map((tokenId) => ({
+      address: POSITION_MANAGER,
+      abi: positionManagerAbi,
+      functionName: 'ownerOf' as const,
+      args: [tokenId] as const,
+    }))
+    try {
+      const results = await publicClient.multicall({ contracts, allowFailure: true })
+      results.forEach((r, idx) => {
+        if (r.status === 'success' && r.result && r.result.toLowerCase() === owner.toLowerCase()) {
+          owned.add(chunk[idx]!.toString())
+        }
+      })
+    } catch (e) {
+      console.warn('[positions] multicall ownerOf failed', e)
+      // On rate limit / failure, skip this chunk rather than abort the whole scan
+    }
+    // Small pause between batches to stay under free RPC limits
+    await new Promise((r) => setTimeout(r, 120))
   }
 
-  // Supplement with recent Transfer logs (helps catch very new mints if scan races).
-  try {
-    const transferEvent = parseAbiItem(
-      'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)',
-    )
-    const latest = await publicClient.getBlockNumber()
-    const step = 1800n
-    const lookback = 60_000n // ~100 minutes at 0.1s blocks
-    const from0 = latest > lookback ? latest - lookback : 0n
-    for (let from = from0; from <= latest; from += step + 1n) {
-      const to = from + step > latest ? latest : from + step
-      const [ins, outs] = await Promise.all([
-        publicClient.getLogs({
-          address: POSITION_MANAGER,
-          event: transferEvent,
-          args: { to: owner },
-          fromBlock: from,
-          toBlock: to,
-        }),
-        publicClient.getLogs({
-          address: POSITION_MANAGER,
-          event: transferEvent,
-          args: { from: owner },
-          fromBlock: from,
-          toBlock: to,
-        }),
-      ])
-      for (const l of ins) {
-        if (l.args.tokenId !== undefined) owned.add(l.args.tokenId.toString())
-      }
-      for (const l of outs) {
-        if (l.args.tokenId !== undefined) owned.delete(l.args.tokenId.toString())
-      }
+  // Verify cached IDs that may be outside the recent window
+  const cachedOutside = [...owned].filter((s) => {
+    const id = Number(s)
+    return id < startId
+  })
+  if (cachedOutside.length) {
+    const contracts = cachedOutside.map((s) => ({
+      address: POSITION_MANAGER,
+      abi: positionManagerAbi,
+      functionName: 'ownerOf' as const,
+      args: [BigInt(s)] as const,
+    }))
+    try {
+      const results = await publicClient.multicall({ contracts, allowFailure: true })
+      results.forEach((r, idx) => {
+        const id = cachedOutside[idx]!
+        if (r.status !== 'success' || !r.result || r.result.toLowerCase() !== owner.toLowerCase()) {
+          owned.delete(id)
+        }
+      })
+    } catch {
+      /* keep cache on failure */
     }
-  } catch (e) {
-    console.warn('[positions] chunked Transfer logs failed, using ownerOf scan', e)
+  }
+
+  // Persist for next load
+  try {
+    localStorage.setItem(cacheKey, JSON.stringify([...owned]))
+  } catch {
+    /* ignore */
   }
 
   return [...owned].map((s) => BigInt(s)).sort((a, b) => (a < b ? -1 : 1))
@@ -260,12 +272,12 @@ export function usePositions(pool: PoolState | null, hypeUsd?: number | null) {
   }, [address, pool, hypeUsd])
 
   useEffect(() => {
-    if (!isConnected || !pool) return
+    if (!isConnected || !pool || !address) return
     void refresh()
-    const id = setInterval(() => void refresh(), 20_000)
+    const id = setInterval(() => void refresh(), 60_000)
     return () => clearInterval(id)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isConnected, address, pool?.fetchedAt])
+  }, [isConnected, address])
 
   const sorted = useMemo(() => positions, [positions])
 
