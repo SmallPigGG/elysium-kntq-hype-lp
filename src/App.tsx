@@ -210,6 +210,12 @@ export default function App() {
           </div>
         </div>
         <div>
+          <div className="label">池子流动性</div>
+          <div className="mono">
+            {pool ? pool.liquidity.toString() : '读取中…'}
+          </div>
+        </div>
+        <div>
           <div className="label">HYPE/USD（可选，仅展示，不伪造）</div>
           <input
             value={hypeUsd}
