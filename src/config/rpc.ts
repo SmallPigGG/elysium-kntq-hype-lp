@@ -1,6 +1,12 @@
-/** Public Elysium RPCs — BOXA first, then failover (chain 99901 / 0x1863d, verified 2026-11-09) */
+/** Public Elysium RPCs — multiple failover endpoints (chain 99901).
+ * Official Conduit node is rate-limited; others are independent public nodes.
+ */
 export const RPC_URLS = [
-  'https://rpc.elysium.kinetiq.xyz'
+  'https://rpc.montramarkets.xyz',
+  'https://rpc.ascendlaunch.xyz',
+  'https://rpc-live.boxa.club',
+  'https://rpc.stockium.fun',
+  'https://rpc.elysium.kinetiq.xyz',
 ] as const
 
 export type RpcUrl = (typeof RPC_URLS)[number]
