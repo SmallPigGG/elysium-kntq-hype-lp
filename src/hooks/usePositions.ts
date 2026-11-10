@@ -40,7 +40,8 @@ export type LpPosition = {
 }
 
 async function tokenIdsForOwner(owner: Address): Promise<bigint[]> {
-  // POSM is not ERC721Enumerable. Prefer recent ownerOf scan (fast), then chunked Transfer logs.
+  // POSM is not ERC721Enumerable. Scan all token IDs via ownerOf (multicall-friendly)
+  // plus recent Transfer logs. Elysium has ~0.1s blocks so log lookback is limited.
   const owned = new Set<string>()
   const next = await publicClient.readContract({
     address: POSITION_MANAGER,
@@ -48,11 +49,12 @@ async function tokenIdsForOwner(owner: Address): Promise<bigint[]> {
     functionName: 'nextTokenId',
   })
   const n = Number(next)
-  // Scan latest window first — covers new mints even when eth_getLogs is capped.
-  const window = Math.min(n - 1, 120)
-  const startId = Math.max(1, n - window)
-  for (let i = startId; i < n; i += 40) {
-    const chunk = Array.from({ length: Math.min(40, n - i) }, (_, k) => BigInt(i + k))
+  if (n <= 1) return []
+
+  // Scan all existing tokenIds in batches. With multicall this is fast enough for ~10k NFTs.
+  const BATCH = 80
+  for (let i = 1; i < n; i += BATCH) {
+    const chunk = Array.from({ length: Math.min(BATCH, n - i) }, (_, k) => BigInt(i + k))
     const owners = await Promise.all(
       chunk.map((tokenId) =>
         publicClient
@@ -70,14 +72,14 @@ async function tokenIdsForOwner(owner: Address): Promise<bigint[]> {
     })
   }
 
-  // Supplement with chunked Transfer logs (RPC max ~2000 blocks).
+  // Supplement with recent Transfer logs (helps catch very new mints if scan races).
   try {
     const transferEvent = parseAbiItem(
       'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)',
     )
     const latest = await publicClient.getBlockNumber()
     const step = 1800n
-    const lookback = 30_000n
+    const lookback = 60_000n // ~100 minutes at 0.1s blocks
     const from0 = latest > lookback ? latest - lookback : 0n
     for (let from = from0; from <= latest; from += step + 1n) {
       const to = from + step > latest ? latest : from + step
@@ -105,7 +107,7 @@ async function tokenIdsForOwner(owner: Address): Promise<bigint[]> {
       }
     }
   } catch (e) {
-    console.warn('[positions] chunked Transfer logs failed, using ownerOf window', e)
+    console.warn('[positions] chunked Transfer logs failed, using ownerOf scan', e)
   }
 
   return [...owned].map((s) => BigInt(s)).sort((a, b) => (a < b ? -1 : 1))
