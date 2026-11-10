@@ -11,6 +11,7 @@ export function PositionGrid({
   manualTokenId,
   onManualTokenIdChange,
   onManualWithdraw,
+  onManualLoad,
   onRefresh,
   onCollect,
   onWithdraw,
@@ -21,6 +22,7 @@ export function PositionGrid({
   manualTokenId: string
   onManualTokenIdChange: (v: string) => void
   onManualWithdraw: () => void
+  onManualLoad: () => void
   onRefresh: () => void
   onCollect: (p: LpPosition) => void
   onWithdraw: (p: LpPosition) => void
@@ -67,6 +69,9 @@ export function PositionGrid({
               placeholder="例如 827"
             />
           </label>
+          <button className="btn" type="button" onClick={onManualLoad}>
+            加载到列表
+          </button>
           <button className="btn danger" type="button" onClick={onManualWithdraw}>
             预览撤池 #{manualTokenId || '…'}
           </button>
@@ -80,7 +85,7 @@ export function PositionGrid({
       {error && <p className="err">持仓读取失败：{error}</p>}
       {!loading && !error && sorted.length === 0 && (
         <p className="muted">
-          暂无本池活跃仓位（已隐藏 liquidity=0）。若刚建仓，点刷新或用上方 TokenId 撤池。
+          暂无本池活跃仓位。可点「刷新列表」，或在上方输入 TokenId 后点「加载到列表」。
         </p>
       )}
       <div className="cards">
