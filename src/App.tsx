@@ -100,6 +100,30 @@ export default function App() {
     }
   }
 
+  async function onManualLoad() {
+    const id = BigInt(manualTokenId.trim() || '0')
+    if (id <= 0n) {
+      alert('请填写有效 tokenId')
+      return
+    }
+    const p = await loadPosition(id)
+    if (!p || !address) return
+    // Persist so the next position refresh includes it
+    try {
+      const key = `elysium-lp-pos:${address.toLowerCase()}`
+      const raw = localStorage.getItem(key)
+      const arr: string[] = raw ? JSON.parse(raw) : []
+      if (!arr.includes(id.toString())) {
+        arr.push(id.toString())
+        localStorage.setItem(key, JSON.stringify(arr))
+      }
+    } catch {
+      /* ignore */
+    }
+    void refreshPos()
+    alert(`已加载仓位 #${id}，刷新后将显示在列表中`)
+  }
+
   async function onManualWithdraw() {
     const id = BigInt(manualTokenId.trim() || '0')
     if (id <= 0n) {
@@ -263,6 +287,7 @@ export default function App() {
               manualTokenId={manualTokenId}
               onManualTokenIdChange={setManualTokenId}
               onManualWithdraw={() => void onManualWithdraw()}
+              onManualLoad={() => void onManualLoad()}
               onRefresh={() => void refreshPos()}
               onCollect={(p) => void onCollect(p)}
               onWithdraw={(p) => void onWithdraw(p)}
